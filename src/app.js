@@ -2,6 +2,9 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import userRoutes from "./routes/user.routes.js";
+import productRoutes from './routes/product.routes.js';
+import orderRoutes from './routes/order.routes.js';
+import invoiceRoutes from "./routes/invoice.routes.js";
 
 // IMPORTAR MIDDLEWARES DE PROTECCIÓN
 import { routeGuard } from "./middlewares/routeGuard.middleware.js";
@@ -93,11 +96,9 @@ app.use(routeGuard());
 // RUTAS PROTEGIDAS (REQUIEREN AUTENTICACIÓN)
 // ============================================
 app.use("/api/users", userRoutes);
-
-// Aquí agregarás otras rutas protegidas en el futuro:
-// app.use("/api/students", studentRoutes);
-// app.use("/api/notas", notasRoutes);
-// etc.
+app.use('/api/products', productRoutes);
+app.use('/api/orders', orderRoutes);
+app.use("/api/invoices", invoiceRoutes);
 
 // ============================================
 // MIDDLEWARE PARA RUTAS NO ENCONTRADAS

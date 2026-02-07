@@ -1,280 +1,256 @@
+// controllers/user.controller.js - VERSIÓN SIMPLIFICADA Y FUNCIONAL
 import bcryptjs from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { UserModel } from "../models/user.model.js";
-import crypto from "crypto";
 import { JWT_SECRET, JWT_REFRESH_SECRET } from "../middlewares/jwt.middleware.js";
-import { db } from "../db/connection.database.js";
+import cloudinary from '../config/cloudinary.config.js';
 
-// **FUNCIÓN HELPER PARA VERIFICAR ESTADO - MEJORADA**
-const isUserActive = (user) => {
-  if (!user || !user.is_active) return false;
-  
-  // Normalizar el estado: convertir a minúsculas, quitar espacios
-  const normalizedStatus = String(user.is_active || '')
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, '');
-  
-  console.log(`🔍 Verificando estado: "${user.is_active}" -> "${normalizedStatus}"`);
-  
-  // Aceptar varias formas de "activo"
-  const activeStatuses = ['activo', 'active', 'activado', 'enabled', 'true', '1', 'yes', 'sí'];
-  return activeStatuses.includes(normalizedStatus);
+// ============================================
+// FUNCIONES PRINCIPALES (QUE COINCIDEN CON TUS RUTAS)
+// ============================================
+
+// REGISTRO
+const register = async (req, res) => {
+  try {
+    const { 
+      dni, user_name, email, password, id_role,
+      first_name, last_name, address, phone_number,
+      commission, shipping_address, purchase_limit, avatar_url
+    } = req.body;
+
+    if (!email || !password || !id_role || !first_name || !last_name || !dni) {
+      return res.status(400).json({
+        ok: false,
+        msg: "Faltan campos requeridos",
+      });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        ok: false,
+        msg: "La contraseña debe tener al menos 6 caracteres",
+      });
+    }
+
+    // Verificar si el email ya existe
+    const existingUserByEmail = await UserModel.findOneByEmail(email);
+    if (existingUserByEmail) {
+      return res.status(400).json({
+        ok: false,
+        msg: "El email ya existe",
+      });
+    }
+
+    // Verificar si el DNI ya existe
+    const existingUserByDni = await UserModel.findByCedula(dni);
+    if (existingUserByDni) {
+      return res.status(400).json({
+        ok: false,
+        msg: "El DNI ya existe",
+      });
+    }
+
+    const newUser = await UserModel.create({
+      dni,
+      user_name: user_name || email,
+      email,
+      password,
+      id_role,
+      first_name,
+      last_name,
+      address,
+      phone_number,
+      commission,
+      shipping_address,
+      purchase_limit
+    });
+
+    if (!newUser) {
+      return res.status(500).json({
+        ok: false,
+        msg: "Error creando usuario",
+      });
+    }
+
+    // Si se proporcionó avatar, actualizarlo
+    if (avatar_url) {
+      try {
+        await UserModel.updateAvatar(newUser.id, avatar_url);
+      } catch (avatarError) {
+        console.log("⚠️ Error asignando avatar:", avatarError.message);
+      }
+    }
+
+    return res.status(201).json({
+      ok: true,
+      msg: "Usuario creado exitosamente",
+      user: {
+        id: newUser.id,
+        username: newUser.username,
+        email: newUser.email,
+        nombre: newUser.nombre || newUser.first_name,
+        apellido: newUser.apellido || newUser.last_name,
+        dni: newUser.dni,
+        phone_number: newUser.phone_number,
+        avatar_url: newUser.avatar_url,
+        id_role: newUser.id_role,
+        is_active: newUser.is_active
+      },
+    });
+  } catch (error) {
+    console.error("Error in register:", error);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error del servidor",
+      error: error.message,
+    });
+  }
 };
 
+// LOGIN
 const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    console.log("🔍 LOGIN - Intento de login para:", email);
-
     if (!email || !password) {
       return res.status(400).json({
         ok: false,
-        msg: "Email and password are required",
+        msg: "Email y contraseña son requeridos",
       });
     }
 
-    console.log("🔍 LOGIN - Buscando usuario en BD...");
     const user = await UserModel.findOneByEmail(email);
-
     if (!user) {
-      console.log("❌ LOGIN - Usuario no encontrado para email:", email);
       return res.status(400).json({
         ok: false,
-        msg: "Invalid email or password",
+        msg: "Email o contraseña incorrectos",
       });
     }
 
-    console.log("✅ LOGIN - Usuario encontrado:", {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      is_active: user.is_active,
-      Id_rol: user.Id_rol,
-    });
-
-    // Verificar estado del usuario con la función mejorada
-    if (!isUserActive(user)) {
-      console.log("❌ LOGIN - Usuario inactivo. Estado:", user.is_active);
+    // Verificar si el usuario está activo
+    if (user.is_active === false) {
       return res.status(403).json({
         ok: false,
-        msg: "Account is inactive. Please contact an administrator",
+        msg: "Cuenta inactiva. Contacte al administrador",
       });
     }
 
-    console.log("🔑 LOGIN - Verificando contraseña...");
-    
-    // DEBUG: Ver qué tipo de password tenemos
-    console.log("🔍 DEBUG - Password en BD (primeros 30 chars):", user.password?.substring(0, 30) || 'N/A');
-    console.log("🔍 DEBUG - Longitud password BD:", user.password?.length || 0);
-    
-    // Verificar si el password está vacío o no existe
-    if (!user.password || user.password.trim() === '') {
-      console.log("❌ LOGIN - Password está vacío en la BD");
-      return res.status(400).json({
-        ok: false,
-        msg: "Invalid email or password",
-      });
-    }
-
+    // Verificar contraseña
     let validPassword = false;
-    let passwordWasMigrated = false;
-    let migratedHash = null;
-
-    // CASO 1: Si el password en BD es un hash bcrypt (usuarios nuevos)
+    
     if (user.password.startsWith('$2')) {
-      console.log("🔐 LOGIN - Password en BD es hash bcrypt, usando bcrypt.compare()");
       validPassword = await bcryptjs.compare(password, user.password);
-      
-      if (!validPassword) {
-        console.log("❌ LOGIN - Contraseña incorrecta (hash bcrypt)");
-      }
-    } 
-    // CASO 2: Si el password en BD está en texto plano (usuarios antiguos)
-    else {
-      console.log("📝 LOGIN - Password en BD es texto plano, comparando directamente");
+    } else {
       validPassword = (user.password === password);
       
       if (validPassword) {
-        console.log("✅ LOGIN - Contraseña correcta (texto plano). Migrando a hash...");
-        
         try {
-          // Auto-migrar a hash bcrypt
-          migratedHash = await UserModel.migratePasswordToHash(user.id, password);
-          passwordWasMigrated = true;
-          console.log("✅ LOGIN - Password migrado exitosamente a hash bcrypt");
+          await UserModel.migratePasswordToHash(user.id, password);
         } catch (migrateError) {
-          console.log("⚠️ LOGIN - Error migrando password (continuando):", migrateError.message);
-          // Continuamos aunque falle la migración
+          console.log("⚠️ Error migrando password:", migrateError.message);
         }
-      } else {
-        console.log("❌ LOGIN - Contraseña incorrecta (texto plano)");
       }
     }
     
     if (!validPassword) {
       return res.status(400).json({
         ok: false,
-        msg: "Invalid email or password",
+        msg: "Email o contraseña incorrectos",
       });
     }
 
-    console.log("🎉 LOGIN - Credenciales válidas, generando tokens...");
-
-    // Verificar si es profesor
-    let profesorInfo = null;
+    // Verificar si es empleado
+    let employeeInfo = null;
     try {
-      profesorInfo = await UserModel.isProfesor(user.id);
-      if (profesorInfo) {
-        console.log("👨‍🏫 LOGIN - Usuario es profesor:", profesorInfo.Id_profesor);
-      }
+      employeeInfo = await UserModel.isEmployee(user.id);
     } catch (error) {
-      console.log("ℹ️ LOGIN - No es profesor o error al verificar:", error.message);
+      console.log("ℹ️ No es empleado:", error.message);
     }
 
-    // Verificar si es representante
-    let representanteInfo = null;
+    // Verificar si es cliente
+    let customerInfo = null;
     try {
-      representanteInfo = await UserModel.isRepresentante(user.id);
-      if (representanteInfo) {
-        console.log("👨‍👩‍👧‍👦 LOGIN - Usuario es representante:", representanteInfo.Id_representante);
-      }
+      customerInfo = await UserModel.isCustomer(user.id);
     } catch (error) {
-      console.log("ℹ️ LOGIN - No es representante o error al verificar:", error.message);
+      console.log("ℹ️ No es cliente:", error.message);
     }
 
-    // Generate access token
+    // Actualizar último login
+    try {
+      await UserModel.updateLastLogin(user.id);
+    } catch (updateError) {
+      console.log("⚠️ Error actualizando last_login:", updateError.message);
+    }
+
+    // Generar tokens
     const accessToken = jwt.sign(
       {
         userId: user.id,
         username: user.username,
-        Id_rol: user.Id_rol,
-        nombre: user.nombre,
-        apellido: user.apellido,
+        Id_rol: user.id_role,
+        nombre: user.nombre || user.first_name,
         email: user.email,
-        cedula: user.cedula,
-        tipo_rol: user.tipo_rol,
-        es_profesor: !!profesorInfo,
-        es_representante: !!representanteInfo,
       },
       JWT_SECRET,
       { expiresIn: "24h" }
     );
 
-    // Generate refresh token
     const refreshToken = jwt.sign(
-      {
-        userId: user.id,
-      },
+      { userId: user.id },
       JWT_REFRESH_SECRET,
       { expiresIn: "7d" }
     );
 
-    console.log("✅ LOGIN - Tokens generados exitosamente");
-    console.log("🔑 LOGIN - Access token para userId:", user.id);
-    console.log("📊 LOGIN - Password migrado:", passwordWasMigrated ? "✅ Sí" : "❌ No");
-
-    // Update last login
-    try {
-      await UserModel.updateLastLogin(user.id);
-    } catch (updateError) {
-      console.log("⚠️ LOGIN - Error actualizando last_login:", updateError.message);
-    }
-
-    // Preparar respuesta del usuario
+    // Preparar respuesta
     const userResponse = {
       id: user.id,
       username: user.username,
       email: user.email,
-      nombre: user.nombre,
-      apellido: user.apellido,
-      cedula: user.cedula,
-      telefono: user.telefono,
-      fecha_nacimiento: user.fecha_nacimiento,
-      genero: user.genero,
-      foto_usuario: user.foto_usuario,
-      Id_rol: user.Id_rol,
-      tipo_rol: user.tipo_rol,
-      Id_direccion: user.Id_direccion,
-      nombre_direccion: user.nombre_direccion,
-      nombre_ciudad: user.nombre_ciudad,
-      nombre_parroquia: user.nombre_parroquia,
-      nombre_municipio: user.nombre_municipio,
-      nombre_estado: user.nombre_estado,
-      nombre_pais: user.nombre_pais,
-      is_active: user.is_active,
-      email_verified: user.email_verified,
-      created_at: user.created_at,
+      nombre: user.nombre || user.first_name,
+      apellido: user.apellido || user.last_name,
+      cedula: user.dni,
+      telefono: user.phone_number,
+      address: user.address,
+      avatar_url: user.avatar_url,
+      phone_number: user.phone_number,
+      id_role: user.id_role,
+      is_active: user.is_active !== false,
+      status: user.is_active !== false ? 'activo' : 'inactivo',
+      created_at: user.created_at
     };
 
-    // Agregar información específica si es profesor
-    if (profesorInfo) {
-      userResponse.Id_profesor = profesorInfo.Id_profesor;
-      userResponse.especialidad = profesorInfo.especialidad;
+    // Agregar información específica
+    if (employeeInfo) {
+      userResponse.id_employee = employeeInfo.id_employee;
+      userResponse.commission = employeeInfo.commission;
+      userResponse.es_empleado = true;
     }
 
-    // Agregar información específica si es representante
-    if (representanteInfo) {
-      userResponse.Id_representante = representanteInfo.Id_representante;
-      userResponse.es_familiar = representanteInfo.es_familiar;
-      userResponse.profesion_rep = representanteInfo.profesion_rep;
-      userResponse.direccion_trabajo_rep = representanteInfo.direccion_trabajo_rep;
+    if (customerInfo) {
+      userResponse.id_customer = customerInfo.id_customer;
+      userResponse.shipping_address = customerInfo.shipping_address;
+      userResponse.purchase_limit = customerInfo.purchase_limit;
+      userResponse.es_cliente = true;
     }
 
     res.json({
       ok: true,
-      msg: "Login successful" + (passwordWasMigrated ? " (password migrado a hash)" : ""),
+      msg: "Login exitoso",
       accessToken,
       refreshToken,
       user: userResponse,
     });
   } catch (error) {
-    console.error("❌ LOGIN - Error general:", error);
+    console.error("Error en login:", error);
     res.status(500).json({
       ok: false,
-      msg: "Server error",
+      msg: "Error del servidor",
       error: error.message,
     });
   }
 };
 
-// ============================================
-// FUNCIÓN PARA MIGRAR TODOS LOS PASSWORDS (Endpoint)
-// ============================================
-const migrateAllPasswords = async (req, res) => {
-  try {
-    console.log("🚀 MIGRATE ALL - Iniciando migración de todos los passwords...");
-    
-    // Verificar si es admin (opcional)
-    if (req.user && req.user.Id_rol !== 1) {
-      return res.status(403).json({
-        ok: false,
-        msg: "Admin access required"
-      });
-    }
-    
-    const result = await UserModel.migrateAllPasswords();
-    
-    return res.json({
-      ok: true,
-      msg: `Migración completada: ${result.migrated} migrados, ${result.errors} errores`,
-      migrated: result.migrated,
-      errors: result.errors,
-      total: result.total,
-      results: result.results
-    });
-    
-  } catch (error) {
-    console.error("❌ MIGRATE ALL - Error general:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-      error: error.message,
-    });
-  }
-};
-
+// REFRESH TOKEN
 const refreshToken = async (req, res) => {
   try {
     const { refreshToken } = req.body;
@@ -282,78 +258,40 @@ const refreshToken = async (req, res) => {
     if (!refreshToken) {
       return res.status(400).json({
         ok: false,
-        msg: "Refresh token is required",
+        msg: "Refresh token requerido",
       });
     }
 
     try {
-      // Verify the refresh token
       const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
       const userId = decoded.userId;
 
-      console.log("🔄 REFRESH - Token válido para userId:", userId);
-
-      // Get the user
       const user = await UserModel.findOneById(userId);
       if (!user) {
         return res.status(404).json({
           ok: false,
-          msg: "User not found",
+          msg: "Usuario no encontrado",
         });
       }
 
-      // **¡CORRECCIÓN APLICADA AQUÍ TAMBIÉN!**
-      if (!isUserActive(user)) {
-        return res.status(403).json({
-          ok: false,
-          msg: "Account is inactive",
-        });
-      }
-
-      // Verificar si es profesor
-      let profesorInfo = null;
-      try {
-        profesorInfo = await UserModel.isProfesor(user.id);
-      } catch (error) {
-        console.log("ℹ️ REFRESH - Error al verificar profesor:", error.message);
-      }
-
-      // Verificar si es representante
-      let representanteInfo = null;
-      try {
-        representanteInfo = await UserModel.isRepresentante(user.id);
-      } catch (error) {
-        console.log("ℹ️ REFRESH - Error al verificar representante:", error.message);
-      }
-
-      // Generate new access token
+      // Generar nuevos tokens
       const accessToken = jwt.sign(
         {
           userId: user.id,
           username: user.username,
-          Id_rol: user.Id_rol,
-          nombre: user.nombre,
-          apellido: user.apellido,
+          Id_rol: user.id_role,
+          nombre: user.nombre || user.first_name,
           email: user.email,
-          cedula: user.cedula,
-          tipo_rol: user.tipo_rol,
-          es_profesor: !!profesorInfo,
-          es_representante: !!representanteInfo,
         },
         JWT_SECRET,
         { expiresIn: "24h" }
       );
 
-      // Generate new refresh token
       const newRefreshToken = jwt.sign(
-        {
-          userId: user.id,
-        },
+        { userId: user.id },
         JWT_REFRESH_SECRET,
         { expiresIn: "7d" }
       );
-
-      console.log("✅ REFRESH - Nuevos tokens generados");
 
       return res.json({
         ok: true,
@@ -361,282 +299,759 @@ const refreshToken = async (req, res) => {
         refreshToken: newRefreshToken,
       });
     } catch (error) {
-      console.error("❌ REFRESH - Error verificando token:", error.message);
-
       if (error.name === "TokenExpiredError") {
         return res.status(401).json({
           ok: false,
-          msg: "Refresh token expired",
+          msg: "Refresh token expirado",
         });
       }
       if (error.name === "JsonWebTokenError") {
         return res.status(401).json({
           ok: false,
-          msg: "Invalid refresh token",
+          msg: "Refresh token inválido",
         });
       }
       throw error;
     }
   } catch (error) {
-    console.error("Error in refreshToken:", error);
+    console.error("Error en refreshToken:", error);
     return res.status(500).json({
       ok: false,
-      msg: "Server error",
+      msg: "Error del servidor",
     });
   }
 };
 
+// LOGOUT
 const logout = async (req, res) => {
   try {
-    // En este sistema simplificado, el logout solo confirma que el token es válido
-    // El cliente debe eliminar el token de su almacenamiento local
     return res.json({
       ok: true,
-      msg: "Logged out successfully",
+      msg: "Sesión cerrada exitosamente",
     });
   } catch (error) {
-    console.error("Error in logout:", error);
+    console.error("Error en logout:", error);
     return res.status(500).json({
       ok: false,
-      msg: "Server error",
+      msg: "Error del servidor",
     });
   }
 };
 
+// PROFILE
 const profile = async (req, res) => {
   try {
-    console.log("👤 PROFILE - Solicitado para userId:", req.user.userId);
-
     const userId = req.user.userId;
     const user = await UserModel.findOneById(userId);
 
     if (!user) {
-      console.log("❌ PROFILE - Usuario no encontrado");
       return res.status(404).json({
         ok: false,
-        msg: "User not found",
+        msg: "Usuario no encontrado",
       });
     }
 
-    console.log("✅ PROFILE - Usuario encontrado:", user.username);
-
-    // Verificar si es profesor
-    let profesorInfo = null;
-    try {
-      profesorInfo = await UserModel.isProfesor(user.id);
-    } catch (error) {
-      console.log("ℹ️ PROFILE - Error al verificar profesor:", error.message);
-    }
-
-    // Verificar si es representante
-    let representanteInfo = null;
-    try {
-      representanteInfo = await UserModel.isRepresentante(user.id);
-    } catch (error) {
-      console.log("ℹ️ PROFILE - Error al verificar representante:", error.message);
-    }
-
-    // Remover campos sensibles
-    const {
-      password: _,
-      security_word: __,
-      respuesta_de_seguridad: ___,
-      password_reset_token: ____,
-      password_reset_expires: _____,
-      email_verification_token: ______,
-      ...userWithoutSensitiveInfo
-    } = user;
-
-    // Agregar información específica si es profesor
-    if (profesorInfo) {
-      userWithoutSensitiveInfo.Id_profesor = profesorInfo.Id_profesor;
-      userWithoutSensitiveInfo.especialidad = profesorInfo.especialidad;
-      userWithoutSensitiveInfo.es_profesor = true;
-    }
-
-    // Agregar información específica si es representante
-    if (representanteInfo) {
-      userWithoutSensitiveInfo.Id_representante = representanteInfo.Id_representante;
-      userWithoutSensitiveInfo.es_familiar = representanteInfo.es_familiar;
-      userWithoutSensitiveInfo.profesion_rep = representanteInfo.profesion_rep;
-      userWithoutSensitiveInfo.direccion_trabajo_rep = representanteInfo.direccion_trabajo_rep;
-      userWithoutSensitiveInfo.es_representante = true;
-    }
+    // Remover password
+    const { password, ...userWithoutPassword } = user;
 
     return res.json({
       ok: true,
-      user: userWithoutSensitiveInfo,
+      user: userWithoutPassword,
     });
   } catch (error) {
-    console.error("❌ PROFILE - Error:", error);
+    console.error("Error en profile:", error);
     return res.status(500).json({
       ok: false,
-      msg: "Server error",
+      msg: "Error del servidor",
       error: error.message,
     });
   }
 };
+
 
 const listUsers = async (req, res) => {
   try {
+    console.log('🔍 LISTUSERS - Iniciando consulta...');
+    
+    // Usar findAll sin procesamiento previo
     const users = await UserModel.findAll();
+    
+    console.log(`🔍 LISTUSERS - Usuarios encontrados en DB: ${users.length}`);
+    
+    const processedUsers = [];
+    
+    for (const user of users) {
+      // Convertir a objeto plano
+      const userObj = user.toJSON ? user.toJSON() : user;
+      
+      // DEPURACIÓN DETALLADA
+      console.log(`👤 Usuario ID ${userObj.id}:`, {
+        is_active: userObj.is_active,
+        is_active_type: typeof userObj.is_active,
+        is_active_raw: JSON.stringify(userObj.is_active),
+        rawData: userObj
+      });
+      
+      // Remover password
+      const { password, ...userWithoutPassword } = userObj;
+      
+      // LOGICA CORREGIDA: Determinar si está activo
+      let isActive = true;
+      
+      // Verificar el valor REAL de is_active
+      if (userObj.is_active === 0 || 
+          userObj.is_active === false ||
+          userObj.is_active === 'false' ||
+          userObj.is_active === '0' ||
+          userObj.is_active === 'inactivo' ||
+          userObj.is_active === 'inactive') {
+        isActive = false;
+        console.log(`   🚨 Usuario ${userObj.id} marcado como INACTIVO (valor: ${userObj.is_active})`);
+      }
+      else if (userObj.is_active === 1 || 
+               userObj.is_active === true ||
+               userObj.is_active === 'true' ||
+               userObj.is_active === '1' ||
+               userObj.is_active === 'activo' ||
+               userObj.is_active === 'active') {
+        isActive = true;
+      }
+      else {
+        // Para valores null, undefined o cualquier otro, asumir activo
+        console.log(`   ⚠️ Usuario ${userObj.id} tiene is_active = ${userObj.is_active}, usando 'activo' por defecto`);
+      }
+      
+      const processedUser = {
+        ...userWithoutPassword,
+        id_user: userObj.id,
+        status: isActive ? 'activo' : 'inactivo',
+        is_active: isActive,
+        register_creation: userObj.created_at,
+        Id_rol: userObj.id_role,
+        // Incluir el valor original para depuración
+        _original_is_active: userObj.is_active,
+        _is_active_type: typeof userObj.is_active
+      };
+      
+      processedUsers.push(processedUser);
+    }
+    
+    // Contar usuarios inactivos
+    const inactiveCount = processedUsers.filter(u => !u.is_active).length;
+    console.log(`📊 LISTUSERS - Total procesados: ${processedUsers.length}, Inactivos: ${inactiveCount}`);
+    
+    // Mostrar IDs de usuarios inactivos
+    if (inactiveCount > 0) {
+      const inactiveIds = processedUsers.filter(u => !u.is_active).map(u => u.id);
+      console.log(`📋 LISTUSERS - IDs de usuarios inactivos:`, inactiveIds);
+    }
+    
     return res.json({
       ok: true,
-      users,
-      total: users.length,
+      users: processedUsers,
+      total: processedUsers.length,
+      _debug: {
+        total_users: processedUsers.length,
+        inactive_users: inactiveCount,
+        server_time: new Date().toISOString()
+      }
     });
   } catch (error) {
-    console.error("Error in listUsers:", error);
+    console.error("❌ LISTUSERS - Error:", error);
     return res.status(500).json({
       ok: false,
-      msg: "Server error",
+      msg: "Error del servidor",
       error: error.message,
     });
   }
 };
 
+
+
+// SEARCH USERS
+const searchUsers = async (req, res) => {
+  try {
+    const { search } = req.query;
+    if (!search) {
+      return res.status(400).json({
+        ok: false,
+        msg: "Parámetro de búsqueda requerido",
+      });
+    }
+    
+    const users = await UserModel.searchByUsername(search);
+    
+    const processedUsers = users.map(user => {
+      const userObj = user.toJSON ? user.toJSON() : user;
+      const { password, ...userWithoutPassword } = userObj;
+      
+      const normalizedStatus = userObj.is_active === true || 
+                               userObj.is_active === 1 || 
+                               userObj.is_active === 'true' || 
+                               userObj.is_active === '1' ||
+                               userObj.is_active === 'activo' || 
+                               userObj.is_active === 'active' 
+                               ? 'activo' : 'inactivo';
+      
+      return {
+        ...userWithoutPassword,
+        id_user: userObj.id,
+        status: normalizedStatus,
+        is_active: normalizedStatus === 'activo',
+      };
+    });
+    
+    return res.json({
+      ok: true,
+      users: processedUsers,
+      total: processedUsers.length,
+    });
+  } catch (error) {
+    console.error("Error en searchUsers:", error);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error del servidor",
+      error: error.message,
+    });
+  }
+};
+
+// UPDATE PROFILE
 const updateProfile = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { 
-      email, security_word, respuesta_de_seguridad, 
-      nombre, apellido, telefono, cedula,
-      fecha_nacimiento, genero, foto_usuario, Id_direccion 
-    } = req.body;
+    const { email, first_name, last_name, address, phone_number, avatar_url } = req.body;
 
-    // Check if email is being updated and if it already exists
+    // Verificar si el email ya existe
     if (email) {
       const existingUserByEmail = await UserModel.findOneByEmail(email);
       if (existingUserByEmail && existingUserByEmail.id !== userId) {
         return res.status(400).json({
           ok: false,
-          msg: "Email already exists",
-        });
-      }
-    }
-
-    // Check if cedula is being updated and if it already exists
-    if (cedula) {
-      const existingUserByCedula = await UserModel.findByCedula(cedula);
-      if (existingUserByCedula && existingUserByCedula.id !== userId) {
-        return res.status(400).json({
-          ok: false,
-          msg: "Cedula already exists",
+          msg: "El email ya existe",
         });
       }
     }
 
     const updatedUser = await UserModel.updateProfile(userId, {
       email,
-      security_word,
-      respuesta_de_seguridad,
-      nombre,
-      apellido,
-      telefono,
-      cedula,
-      fecha_nacimiento,
-      genero,
-      foto_usuario,
-      Id_direccion,
+      first_name,
+      last_name,
+      address,
+      phone_number,
+      avatar_url
     });
 
     if (!updatedUser) {
       return res.status(404).json({
         ok: false,
-        msg: "User not found",
+        msg: "Usuario no encontrado",
       });
     }
 
     return res.json({
       ok: true,
-      msg: "Profile updated successfully",
+      msg: "Perfil actualizado exitosamente",
       user: updatedUser,
     });
   } catch (error) {
-    console.error("Error in updateProfile:", error);
+    console.error("Error en updateProfile:", error);
     return res.status(500).json({
       ok: false,
-      msg: "Server error",
+      msg: "Error del servidor",
       error: error.message,
     });
   }
 };
 
-// Nueva función para actualizar perfil con validación de seguridad
-const updateProfileWithSecurity = async (req, res) => {
+// ============================================
+// FUNCIONES PARA AVATAR
+// ============================================
+
+const uploadAvatar = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { 
-      email, security_word, respuesta_de_seguridad, current_security_answer,
-      nombre, apellido, telefono, cedula, fecha_nacimiento, genero, foto_usuario, Id_direccion 
-    } = req.body;
-
-    if (!current_security_answer) {
+    
+    if (!req.file) {
       return res.status(400).json({
         ok: false,
-        msg: "Current security answer is required",
+        msg: 'No se subió ningún archivo'
       });
     }
 
-    // Check if email is being updated and if it already exists
+    const avatarUrl = req.file.path;
+    
+    // Eliminar avatar anterior si existe
+    const user = await UserModel.findOneById(userId);
+    if (user && user.avatar_url && user.avatar_url.includes('cloudinary')) {
+      try {
+        const oldUrlParts = user.avatar_url.split('/');
+        const oldFileName = oldUrlParts[oldUrlParts.length - 1];
+        const oldPublicId = oldFileName.split('.')[0];
+        const oldFullPublicId = `user_avatars/${oldPublicId}`;
+        await cloudinary.uploader.destroy(oldFullPublicId);
+      } catch (deleteError) {
+        console.log('⚠️ Error eliminando imagen anterior:', deleteError.message);
+      }
+    }
+    
+    await UserModel.updateAvatar(userId, avatarUrl);
+
+    return res.json({
+      ok: true,
+      msg: 'Avatar subido exitosamente',
+      avatar_url: avatarUrl,
+    });
+  } catch (error) {
+    console.error('Error subiendo avatar:', error);
+    return res.status(500).json({
+      ok: false,
+      msg: 'Error al subir avatar',
+      error: error.message
+    });
+  }
+};
+
+const deleteAvatar = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    
+    const user = await UserModel.findOneById(userId);
+    if (!user.avatar_url) {
+      return res.status(400).json({
+        ok: false,
+        msg: 'El usuario no tiene avatar'
+      });
+    }
+
+    // Eliminar de Cloudinary si es una URL de Cloudinary
+    if (user.avatar_url.includes('cloudinary')) {
+      try {
+        const urlParts = user.avatar_url.split('/');
+        const fileNameWithExtension = urlParts[urlParts.length - 1];
+        const publicId = fileNameWithExtension.split('.')[0];
+        const fullPublicId = `user_avatars/${publicId}`;
+        await cloudinary.uploader.destroy(fullPublicId);
+      } catch (cloudinaryError) {
+        console.log('⚠️ Error eliminando de Cloudinary:', cloudinaryError.message);
+      }
+    }
+
+    await UserModel.updateAvatar(userId, null);
+
+    return res.json({
+      ok: true,
+      msg: 'Avatar eliminado exitosamente',
+      avatar_url: null
+    });
+  } catch (error) {
+    console.error('Error eliminando avatar:', error);
+    return res.status(500).json({
+      ok: false,
+      msg: 'Error al eliminar avatar',
+      error: error.message
+    });
+  }
+};
+
+const updateAvatar = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { avatar_url } = req.body;
+
+    if (!avatar_url) {
+      return res.status(400).json({
+        ok: false,
+        msg: "URL del avatar requerida",
+      });
+    }
+
+    // Eliminar avatar anterior si es de Cloudinary
+    const user = await UserModel.findOneById(userId);
+    if (user && user.avatar_url && user.avatar_url.includes('cloudinary')) {
+      try {
+        const urlParts = user.avatar_url.split('/');
+        const fileName = urlParts[urlParts.length - 1];
+        const publicId = fileName.split('.')[0];
+        const fullPublicId = `user_avatars/${publicId}`;
+        await cloudinary.uploader.destroy(fullPublicId);
+      } catch (deleteError) {
+        console.log('⚠️ Error eliminando imagen anterior:', deleteError.message);
+      }
+    }
+
+    await UserModel.updateAvatar(userId, avatar_url);
+
+    return res.json({
+      ok: true,
+      msg: "Avatar actualizado exitosamente",
+      avatar_url,
+    });
+  } catch (error) {
+    console.error("Error actualizando avatar:", error);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error del servidor",
+      error: error.message,
+    });
+  }
+};
+
+const updateProfileWithAvatar = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { email, first_name, last_name, address, phone_number } = req.body;
+
+    let avatarUrl = null;
+
+    // Si se subió un archivo, procesar avatar
+    if (req.file) {
+      avatarUrl = req.file.path;
+      
+      // Eliminar avatar anterior si existe
+      const user = await UserModel.findOneById(userId);
+      if (user && user.avatar_url && user.avatar_url.includes('cloudinary')) {
+        try {
+          const oldUrlParts = user.avatar_url.split('/');
+          const oldFileName = oldUrlParts[oldUrlParts.length - 1];
+          const oldPublicId = oldFileName.split('.')[0];
+          const oldFullPublicId = `user_avatars/${oldPublicId}`;
+          await cloudinary.uploader.destroy(oldFullPublicId);
+        } catch (deleteError) {
+          console.log('⚠️ Error eliminando imagen anterior:', deleteError.message);
+        }
+      }
+    }
+
+    // Verificar si el email ya existe
     if (email) {
       const existingUserByEmail = await UserModel.findOneByEmail(email);
       if (existingUserByEmail && existingUserByEmail.id !== userId) {
         return res.status(400).json({
           ok: false,
-          msg: "Email already exists",
+          msg: "El email ya existe",
         });
       }
     }
 
-    // Check if cedula is being updated and if it already exists
-    if (cedula) {
-      const existingUserByCedula = await UserModel.findByCedula(cedula);
-      if (existingUserByCedula && existingUserByCedula.id !== userId) {
-        return res.status(400).json({
-          ok: false,
-          msg: "Cedula already exists",
-        });
-      }
-    }
-
-    const updatedUser = await UserModel.updateProfileWithSecurity(userId, {
+    const updatedUser = await UserModel.updateProfile(userId, {
       email,
-      security_word,
-      respuesta_de_seguridad,
-      current_security_answer,
-      nombre,
-      apellido,
-      telefono,
-      cedula,
-      fecha_nacimiento,
-      genero,
-      foto_usuario,
-      Id_direccion,
+      first_name,
+      last_name,
+      address,
+      phone_number,
+      avatar_url: avatarUrl
     });
 
-    return res.json({
-      ok: true,
-      msg: "Profile updated successfully with security validation",
-      user: updatedUser,
-    });
-  } catch (error) {
-    console.error("Error in updateProfileWithSecurity:", error);
-
-    if (error.message === "Invalid security answer") {
-      return res.status(400).json({
+    if (!updatedUser) {
+      return res.status(404).json({
         ok: false,
-        msg: "Invalid security answer",
+        msg: "Usuario no encontrado",
       });
     }
 
+    return res.json({
+      ok: true,
+      msg: "Perfil actualizado exitosamente",
+      user: updatedUser,
+    });
+  } catch (error) {
+    console.error("Error en updateProfileWithAvatar:", error);
     return res.status(500).json({
       ok: false,
-      msg: "Server error",
+      msg: "Error del servidor",
       error: error.message,
     });
   }
 };
+
+// ============================================
+// FUNCIONES PARA ADMINISTRACIÓN DE USUARIOS
+// ============================================
+
+const getUserById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await UserModel.findOneById(id);
+
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        msg: "Usuario no encontrado",
+      });
+    }
+
+    const { password, ...userWithoutPassword } = user;
+    
+    return res.json({
+      ok: true,
+      user: userWithoutPassword,
+    });
+  } catch (error) {
+    console.error("Error en getUserById:", error);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error del servidor",
+      error: error.message,
+    });
+  }
+};
+
+const updateUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { dni, user_name, email, first_name, last_name, address, phone_number, id_role, password } = req.body;
+
+    const existingUser = await UserModel.findOneById(id);
+    if (!existingUser) {
+      return res.status(404).json({
+        ok: false,
+        msg: "Usuario no encontrado",
+      });
+    }
+
+    // Verificar unicidad de email
+    if (email && email !== existingUser.email) {
+      const userWithEmail = await UserModel.findOneByEmail(email);
+      if (userWithEmail && userWithEmail.id !== parseInt(id)) {
+        return res.status(400).json({
+          ok: false,
+          msg: "El email ya existe",
+        });
+      }
+    }
+
+    // Verificar unicidad de DNI
+    if (dni && dni !== existingUser.dni) {
+      const userWithDni = await UserModel.findByCedula(dni);
+      if (userWithDni && userWithDni.id !== parseInt(id)) {
+        return res.status(400).json({
+          ok: false,
+          msg: "El DNI ya existe",
+        });
+      }
+    }
+
+    // Preparar datos
+    const updateData = {
+      dni: dni || existingUser.dni,
+      email: email || existingUser.email,
+      first_name: first_name || existingUser.first_name,
+      last_name: last_name || existingUser.last_name,
+      address: address !== undefined ? address : existingUser.address,
+      phone_number: phone_number !== undefined ? phone_number : existingUser.phone_number,
+    };
+
+    // Actualizar username si se proporciona
+    if (user_name && user_name !== existingUser.username) {
+      const userWithUsername = await UserModel.findOneByUsername(user_name);
+      if (userWithUsername && userWithUsername.id !== parseInt(id)) {
+        return res.status(400).json({
+          ok: false,
+          msg: "El nombre de usuario ya existe",
+        });
+      }
+      updateData.user_name = user_name;
+    }
+
+    // Actualizar rol
+    if (id_role) {
+      updateData.id_role = id_role;
+    }
+
+    // Actualizar password
+    if (password) {
+      if (password.length < 6) {
+        return res.status(400).json({
+          ok: false,
+          msg: "La contraseña debe tener al menos 6 caracteres",
+        });
+      }
+      const salt = await bcryptjs.genSalt(10);
+      const hashedPassword = await bcryptjs.hash(password, salt);
+      updateData.password = hashedPassword;
+    }
+
+    const updatedUser = await UserModel.updateProfile(id, updateData);
+
+    return res.json({
+      ok: true,
+      msg: "Usuario actualizado exitosamente",
+      user: updatedUser,
+    });
+  } catch (error) {
+    console.error("Error en updateUser:", error);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error del servidor",
+      error: error.message,
+    });
+  }
+};
+
+const changeUserStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (status === undefined) {
+      return res.status(400).json({
+        ok: false,
+        msg: "Estado requerido",
+      });
+    }
+
+    const user = await UserModel.findOneById(id);
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        msg: "Usuario no encontrado",
+      });
+    }
+
+    // Convertir status a booleano
+    let isActive;
+    if (typeof status === 'string') {
+      isActive = status === 'true' || status === 'activo' || status === 'active' || status === '1';
+    } else {
+      isActive = Boolean(status);
+    }
+
+    const updatedUser = await UserModel.setActive(id, isActive);
+
+    return res.json({
+      ok: true,
+      msg: `Usuario ${isActive ? 'activado' : 'desactivado'} exitosamente`,
+      user: {
+        ...updatedUser,
+        status: isActive ? 'activo' : 'inactivo',
+        is_active: isActive
+      },
+    });
+  } catch (error) {
+    console.error("Error en changeUserStatus:", error);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error del servidor",
+      error: error.message,
+    });
+  }
+};
+
+const reactivateUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await UserModel.findOneById(id);
+    
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        msg: "Usuario no encontrado",
+      });
+    }
+
+    const updatedUser = await UserModel.setActive(id, true);
+
+    return res.json({
+      ok: true,
+      msg: "Usuario reactivado exitosamente",
+      user: {
+        ...updatedUser,
+        status: 'activo',
+        is_active: true
+      },
+    });
+  } catch (error) {
+    console.error("Error en reactivateUser:", error);
+    return res.status(500).json({
+      ok: false,
+      msg: "Error del servidor",
+      error: error.message,
+    });
+  }
+};
+
+// Alias para activateUser
+const activateUser = async (req, res) => {
+  return changeUserStatus(req, res);
+};
+
+// Alias para deactivateUser  
+const deactivateUser = async (req, res) => {
+  req.body.status = false;
+  return changeUserStatus(req, res);
+};
+
+const deleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const user = await UserModel.findOneById(id);
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        msg: "Usuario no encontrado",
+      });
+    }
+    
+    // Verificar si tiene registros relacionados
+    try {
+      const employeeInfo = await UserModel.isEmployee(id);
+      if (employeeInfo) {
+        return res.status(400).json({
+          ok: false,
+          msg: "No se puede eliminar empleados con registros relacionados",
+          suggestion: "Use desactivar en lugar de eliminar"
+        });
+      }
+    } catch (error) {
+      console.log("ℹ️ Verificando empleado:", error.message);
+    }
+    
+    // Eliminar avatar si existe
+    if (user.avatar_url && user.avatar_url.includes('cloudinary')) {
+      try {
+        const urlParts = user.avatar_url.split('/');
+        const fileName = urlParts[urlParts.length - 1];
+        const publicId = fileName.split('.')[0];
+        const fullPublicId = `user_avatars/${publicId}`;
+        await cloudinary.uploader.destroy(fullPublicId);
+      } catch (deleteError) {
+        console.log('⚠️ Error eliminando avatar:', deleteError.message);
+      }
+    }
+    
+    const result = await UserModel.remove(id);
+    
+    return res.json({
+      ok: true,
+      msg: "Usuario eliminado exitosamente",
+      id: result.id,
+    });
+  } catch (error) {
+    console.error("Error eliminando usuario:", error);
+    
+    // Manejar error de foreign key
+    if (error.message.includes('foreign key constraint') || 
+        error.message.includes('viola la llave foránea')) {
+      return res.status(400).json({
+        ok: false,
+        msg: "No se puede eliminar este usuario porque tiene registros relacionados",
+        suggestion: "Desactive el usuario en lugar de eliminarlo"
+      });
+    }
+    
+    return res.status(500).json({
+      ok: false,
+      msg: "Error del servidor",
+      error: error.message,
+    });
+  }
+};
+
+// ============================================
+// FUNCIONES PARA CONTRASEÑAS
+// ============================================
 
 const changePassword = async (req, res) => {
   try {
@@ -646,14 +1061,14 @@ const changePassword = async (req, res) => {
     if (!currentPassword || !newPassword) {
       return res.status(400).json({
         ok: false,
-        msg: "Current password and new password are required",
+        msg: "Contraseña actual y nueva contraseña requeridas",
       });
     }
 
     if (newPassword.length < 6) {
       return res.status(400).json({
         ok: false,
-        msg: "New password must be at least 6 characters long",
+        msg: "La nueva contraseña debe tener al menos 6 caracteres",
       });
     }
 
@@ -661,27 +1076,23 @@ const changePassword = async (req, res) => {
     if (!user) {
       return res.status(404).json({
         ok: false,
-        msg: "User not found",
+        msg: "Usuario no encontrado",
       });
     }
 
-    // Verificar contraseña actual (soporta texto plano y hash)
+    // Verificar contraseña actual
     let validCurrentPassword = false;
     
     if (user.password.startsWith('$2')) {
-      // Si es hash bcrypt
       validCurrentPassword = await bcryptjs.compare(currentPassword, user.password);
     } else {
-      // Si es texto plano
       validCurrentPassword = (user.password === currentPassword);
       
-      // Si la contraseña es correcta y está en texto plano, migrarla
       if (validCurrentPassword) {
         try {
           await UserModel.migratePasswordToHash(userId, currentPassword);
-          console.log("✅ CHANGE PASSWORD - Password actual migrado a hash");
         } catch (migrateError) {
-          console.log("⚠️ CHANGE PASSWORD - Error migrando password:", migrateError.message);
+          console.log("⚠️ Error migrando password:", migrateError.message);
         }
       }
     }
@@ -689,7 +1100,7 @@ const changePassword = async (req, res) => {
     if (!validCurrentPassword) {
       return res.status(400).json({
         ok: false,
-        msg: "Current password is incorrect",
+        msg: "Contraseña actual incorrecta",
       });
     }
 
@@ -701,511 +1112,70 @@ const changePassword = async (req, res) => {
 
     return res.json({
       ok: true,
-      msg: "Password changed successfully",
+      msg: "Contraseña cambiada exitosamente",
     });
   } catch (error) {
-    console.error("Error in changePassword:", error);
+    console.error("Error en changePassword:", error);
     return res.status(500).json({
       ok: false,
-      msg: "Server error",
+      msg: "Error del servidor",
       error: error.message,
     });
   }
 };
 
-// Nueva función para cambiar contraseña con palabra de seguridad
-const changePasswordWithSecurity = async (req, res) => {
+const migrateAllPasswords = async (req, res) => {
   try {
-    const { username, respuesta_de_seguridad, newPassword } = req.body;
-
-    if (!username || !respuesta_de_seguridad || !newPassword) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Username, security answer, and new password are required",
-      });
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({
-        ok: false,
-        msg: "New password must be at least 6 characters long",
-      });
-    }
-
-    const updatedUser = await UserModel.changePasswordWithSecurity(username, respuesta_de_seguridad, newPassword);
-
+    const result = await UserModel.migrateAllPasswords();
+    
     return res.json({
       ok: true,
-      msg: "Password changed successfully using security question",
-      user: {
-        id: updatedUser.id,
-        username: updatedUser.username,
-        email: updatedUser.email,
-        nombre: updatedUser.nombre,
-        apellido: updatedUser.apellido,
-      },
+      msg: `Migración completada: ${result.migrated} migrados, ${result.errors} errores`,
+      ...result
     });
+    
   } catch (error) {
-    console.error("Error in changePasswordWithSecurity:", error);
-
-    if (error.message === "Invalid username or security answer") {
-      return res.status(400).json({
-        ok: false,
-        msg: "Invalid username or security answer",
-      });
-    }
-
+    console.error("Error en migrateAllPasswords:", error);
     return res.status(500).json({
       ok: false,
-      msg: "Server error",
+      msg: "Error del servidor",
       error: error.message,
     });
   }
 };
 
-const forgotPassword = async (req, res) => {
-  try {
-    const { email } = req.body;
-
-    if (!email) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Email is required",
-      });
-    }
-
-    const user = await UserModel.findOneByEmail(email);
-    if (!user) {
-      return res.json({
-        ok: true,
-        msg: "If your email exists in our system, you will receive a password reset token",
-      });
-    }
-
-    const resetToken = crypto.randomBytes(20).toString("hex");
-    await UserModel.setPasswordResetToken(user.id, resetToken);
-
-    return res.json({
-      ok: true,
-      msg: "If your email exists in our system, you will receive a password reset token",
-      resetToken,
-    });
-  } catch (error) {
-    console.error("Error in forgotPassword:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-      error: error.message,
-    });
-  }
-};
-
-const resetPassword = async (req, res) => {
-  try {
-    const { token, newPassword } = req.body;
-
-    if (!token || !newPassword) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Token and new password are required",
-      });
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({
-        ok: false,
-        msg: "New password must be at least 6 characters long",
-      });
-    }
-
-    const user = await UserModel.findByPasswordResetToken(token);
-    if (!user) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Invalid or expired password reset token",
-      });
-    }
-
-    const salt = await bcryptjs.genSalt(10);
-    const hashedPassword = await bcryptjs.hash(newPassword, salt);
-
-    await UserModel.updatePassword(user.id, hashedPassword);
-    await UserModel.clearPasswordResetToken(user.id);
-
-    return res.json({
-      ok: true,
-      msg: "Password has been reset successfully",
-    });
-  } catch (error) {
-    console.error("Error in resetPassword:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-      error: error.message,
-    });
-  }
-};
-
-const activateUser = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const user = await UserModel.findOneById(id);
-    if (!user) {
-      return res.status(404).json({
-        ok: false,
-        msg: "User not found",
-      });
-    }
-
-    const updatedUser = await UserModel.setActive(id, true);
-
-    return res.json({
-      ok: true,
-      msg: "User activated successfully",
-      user: updatedUser,
-    });
-  } catch (error) {
-    console.error("Error in activateUser:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-      error: error.message,
-    });
-  }
-};
-
-const deactivateUser = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const user = await UserModel.findOneById(id);
-    if (!user) {
-      return res.status(404).json({
-        ok: false,
-        msg: "User not found",
-      });
-    }
-
-    const updatedUser = await UserModel.setActive(id, false);
-
-    return res.json({
-      ok: true,
-      msg: "User deactivated successfully",
-      user: updatedUser,
-    });
-  } catch (error) {
-    console.error("Error in deactivateUser:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-      error: error.message,
-    });
-  }
-};
-
-const deleteUser = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const user = await UserModel.findOneById(id);
-    if (!user) {
-      return res.status(404).json({
-        ok: false,
-        msg: "User not found",
-      });
-    }
-
-    const result = await UserModel.remove(id);
-
-    return res.json({
-      ok: true,
-      msg: "User deleted successfully",
-      id: result.id,
-    });
-  } catch (error) {
-    console.error("Error in deleteUser:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-      error: error.message,
-    });
-  }
-};
-
-const searchUsers = async (req, res) => {
-  try {
-    const { search } = req.query;
-    if (!search) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Search parameter is required",
-      });
-    }
-
-    const users = await UserModel.searchByUsername(search);
-    return res.json({
-      ok: true,
-      users,
-      total: users.length,
-    });
-  } catch (error) {
-    console.error("Error in searchUsers:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-      error: error.message,
-    });
-  }
-};
-
-const verifyEmail = async (req, res) => {
-  try {
-    const { token } = req.params;
-
-    const user = await UserModel.verifyEmail(token);
-    if (!user) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Invalid or expired verification token",
-      });
-    }
-
-    return res.json({
-      ok: true,
-      msg: "Email verified successfully",
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        email_verified: user.email_verified,
-        nombre: user.nombre,
-        apellido: user.apellido,
-      },
-    });
-  } catch (error) {
-    console.error("Error in verifyEmail:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-      error: error.message,
-    });
-  }
-};
-
-const recoverPasswordWithSecurity = async (req, res) => {
-  try {
-    const { username, respuesta_de_seguridad, newPassword } = req.body;
-
-    if (!username || !respuesta_de_seguridad || !newPassword) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Username, security answer, and new password are required",
-      });
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({
-        ok: false,
-        msg: "New password must be at least 6 characters long",
-      });
-    }
-
-    // Verify security answer
-    const user = await UserModel.verifySecurityAnswer(username, respuesta_de_seguridad);
-    if (!user) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Invalid username or security answer",
-      });
-    }
-
-    // Hash new password
-    const salt = await bcryptjs.genSalt(10);
-    const hashedPassword = await bcryptjs.hash(newPassword, salt);
-
-    // Update password
-    await UserModel.updatePassword(user.id, hashedPassword);
-
-    return res.json({
-      ok: true,
-      msg: "Password has been reset successfully using security question",
-    });
-  } catch (error) {
-    console.error("Error in recoverPasswordWithSecurity:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-      error: error.message,
-    });
-  }
-};
-
-const getSecurityQuestion = async (req, res) => {
-  try {
-    const { username } = req.params;
-
-    if (!username) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Username is required",
-      });
-    }
-
-    const user = await UserModel.findOneByUsername(username);
-    if (!user) {
-      // For security reasons, don't reveal that the user doesn't exist
-      return res.status(404).json({
-        ok: false,
-        msg: "User not found",
-      });
-    }
-
-    return res.json({
-      ok: true,
-      security_question: user.security_word,
-      username: user.username,
-    });
-  } catch (error) {
-    console.error("Error in getSecurityQuestion:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-    });
-  }
-};
-
-const register = async (req, res) => {
-  try {
-    const { 
-      username, email, password, Id_rol, security_word, respuesta_de_seguridad,
-      nombre, apellido, cedula, telefono, fecha_nacimiento, genero, foto_usuario, Id_direccion 
-    } = req.body;
-
-    if ((!username && !email) || !password || !Id_rol) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Missing required fields: email or username, password, and Id_rol are mandatory",
-      });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Password must be at least 6 characters long",
-      });
-    }
-
-    if (!nombre || !apellido || !cedula) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Nombre, apellido, and cedula are required",
-      });
-    }
-
-    // Use email as username if username not provided
-    const finalUsername = username || email;
-
-    // Check if username/email already exists
-    const existingUser = await UserModel.findOneByUsername(finalUsername);
-    if (existingUser) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Username or email already exists",
-      });
-    }
-
-    // Check if email already exists (if provided and different from username)
-    if (email && email !== finalUsername) {
-      const existingUserByEmail = await UserModel.findOneByEmail(email);
-      if (existingUserByEmail) {
-        return res.status(400).json({
-          ok: false,
-          msg: "Email already exists",
-        });
-      }
-    }
-
-    // Check if cedula already exists
-    const existingUserByCedula = await UserModel.findByCedula(cedula);
-    if (existingUserByCedula) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Cedula already exists",
-      });
-    }
-
-    const newUser = await UserModel.create({
-      username: finalUsername,
-      email: email || finalUsername,
-      password,
-      Id_rol,
-      security_word,
-      respuesta_de_seguridad,
-      nombre,
-      apellido,
-      cedula,
-      telefono,
-      fecha_nacimiento,
-      genero,
-      foto_usuario,
-      Id_direccion
-    });
-
-    if (!newUser) {
-      return res.status(500).json({
-        ok: false,
-        msg: "Error creating user",
-      });
-    }
-
-    return res.status(201).json({
-      ok: true,
-      msg: "User created successfully",
-      user: {
-        id: newUser.id,
-        username: newUser.username,
-        email: newUser.email,
-        nombre: newUser.nombre,
-        apellido: newUser.apellido,
-        cedula: newUser.cedula,
-        telefono: newUser.telefono,
-        Id_rol: newUser.Id_rol,
-        Id_direccion: newUser.Id_direccion,
-        is_active: newUser.is_active,
-        email_verified: newUser.email_verified,
-        created_at: newUser.created_at,
-      },
-    });
-  } catch (error) {
-    console.error("Error in register:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error",
-      error: error.message,
-    });
-  }
-};
-
+// ============================================
+// EXPORTACIÓN
+// ============================================
 export const UserController = {
+  // Rutas públicas
   register,
   login,
   refreshToken,
   logout,
+  
+  // Rutas protegidas
   profile,
   listUsers,
+  searchUsers,
   updateProfile,
-  updateProfileWithSecurity,
-  changePassword,
-  changePasswordWithSecurity,
-  forgotPassword,
-  resetPassword,
+  
+  // Avatar
+  uploadAvatar,
+  deleteAvatar,
+  updateAvatar,
+  updateProfileWithAvatar,
+  
+  // Administración
+  getUserById,
+  updateUser,
+  changeUserStatus,
+  reactivateUser,
   activateUser,
   deactivateUser,
   deleteUser,
-  searchUsers,
-  verifyEmail,
-  recoverPasswordWithSecurity,
-  getSecurityQuestion,
+  
+  // Contraseñas
+  changePassword,
   migrateAllPasswords
 };

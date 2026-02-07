@@ -1,52 +1,62 @@
-// src/middlewares/role.middleware.js
-
-// Mapeo de Id_rol a nombres de roles
+// Mapeo de Id_rol a nombres de roles para SISTEMA DE VENTAS
 export const roleMap = {
-  1: 'admin',
-  2: 'docente', 
-  3: 'estudiante',
-  4: 'representante'
+  1: 'admin',        // Administrador del sistema
+  2: 'gerente',      // Gerente de tienda
+  3: 'empleado',     // Empleado de ventas
+  4: 'cliente'       // Cliente
 };
 
-// Configuración de permisos por ruta
+// Configuración de permisos por ruta para SISTEMA DE VENTAS
 const routePermissions = {
   // Rutas de administración (solo admin)
   '/api/users/list': ['admin'],
   '/api/users/activate/:id': ['admin'],
   '/api/users/deactivate/:id': ['admin'],
   '/api/users/:id': ['admin'],
+  '/api/users/migrate-passwords': ['admin'],
   
-  // Rutas de ejemplo para futuros módulos
-  '/api/students': ['admin'],
-  '/api/students/*': ['admin'],
-  '/api/inscripcion': ['admin'],
-  '/api/inscripcion/*': ['admin'],
-  '/api/aulas': ['admin'],
-  '/api/aulas/*': ['admin'],
+  // Rutas de gestión de productos (admin y gerente)
+  '/api/products': ['admin', 'gerente'],
+  '/api/products/*': ['admin', 'gerente'],
   
-  // Rutas compartidas admin + docente
-  '/api/notas': ['admin', 'docente'],
-  '/api/notas/*': ['admin', 'docente'],
-  '/api/boletin': ['admin', 'docente'],
-  '/api/boletin/*': ['admin', 'docente'],
-  '/api/horario': ['admin', 'docente'],
-  '/api/horario/*': ['admin', 'docente'],
+  // Rutas de gestión de inventario (admin, gerente y empleados)
+  '/api/inventory': ['admin', 'gerente', 'empleado'],
+  '/api/inventory/*': ['admin', 'gerente', 'empleado'],
   
-  // Rutas específicas de docente
-  '/api/docente/inicio': ['docente'],
-  '/api/docente/horario': ['docente'],
-  '/api/docente/estudiantes': ['docente'],
+  // Rutas de gestión de pedidos (admin, gerente y empleados)
+  '/api/orders': ['admin', 'gerente', 'empleado'],
+  '/api/orders/*': ['admin', 'gerente', 'empleado'],
   
-  // Rutas específicas de representante
-  '/api/representante/inicio': ['representante'],
-  '/api/representante/estudiantes': ['representante'],
-  '/api/representante/boletin': ['representante'],
-  '/api/representante/horario': ['representante'],
+  // Rutas de facturación (admin y gerente)
+  '/api/billing': ['admin', 'gerente'],
+  '/api/billing/*': ['admin', 'gerente'],
+  
+  // Rutas de reportes (admin y gerente)
+  '/api/reports': ['admin', 'gerente'],
+  '/api/reports/*': ['admin', 'gerente'],
+  
+  // Rutas de stock (admin, gerente y empleados)
+  '/api/stock': ['admin', 'gerente', 'empleado'],
+  '/api/stock/*': ['admin', 'gerente', 'empleado'],
+  
+  // Rutas específicas de empleado
+  '/api/employee/dashboard': ['empleado'],
+  '/api/employee/orders': ['empleado'],
+  
+  // Rutas específicas de cliente
+  '/api/customer/products': ['cliente'],
+  '/api/customer/orders': ['cliente'],
+  '/api/customer/profile': ['cliente'],
+  
+  // Rutas de perfil (todos los roles)
+  '/api/users/profile': ['admin', 'gerente', 'empleado', 'cliente'],
+  '/api/users/change-password': ['admin', 'gerente', 'empleado', 'cliente'],
+  
+  // Rutas públicas (ya manejadas en routeGuard)
 };
 
 /**
  * Middleware para verificación automática de roles
- * Se usa en rutas específicas después de verifyToken
  */
 export const autoVerifyRole = async (req, res, next) => {
   try {
@@ -54,20 +64,9 @@ export const autoVerifyRole = async (req, res, next) => {
     const method = req.method;
     
     console.log(`\n🔍 AUTO VERIFY ROLE - ${method} ${path}`);
-    console.log(`👤 Usuario en req.user:`, req.user ? '✅ Sí' : '❌ No');
     
-    if (req.user) {
-      console.log(`📋 Datos del usuario:`, {
-        userId: req.user.userId,
-        Id_rol: req.user.Id_rol,
-        username: req.user.username,
-        email: req.user.email
-      });
-    }
-
-    // Si no hay usuario autenticado, dejar que verifyToken maneje el error
     if (!req.user || !req.user.userId) {
-      console.log(`⚠️ No hay usuario autenticado, continuando para que verifyToken maneje el error...`);
+      console.log(`⚠️ No hay usuario autenticado, continuando...`);
       return next();
     }
 
@@ -99,7 +98,7 @@ export const autoVerifyRole = async (req, res, next) => {
 
     // Obtener rol del usuario desde el token
     const userRoleId = req.user.Id_rol;
-    const userRole = roleMap[userRoleId] || 'estudiante';
+    const userRole = roleMap[userRoleId] || 'cliente';
     
     console.log(`👤 Rol del usuario: "${userRole}" (Id_rol: ${userRoleId})`);
 
@@ -109,7 +108,6 @@ export const autoVerifyRole = async (req, res, next) => {
       console.warn(`   Usuario ID: ${req.user.userId}`);
       console.warn(`   Usuario rol: ${userRole}`);
       console.warn(`   Roles requeridos: ${requiredRoles.join(', ')}`);
-      console.warn(`   Patrón coincidente: ${matchedPattern}`);
       
       return res.status(403).json({
         ok: false,
@@ -127,15 +125,13 @@ export const autoVerifyRole = async (req, res, next) => {
     console.log(`\n✅ ACCESO PERMITIDO - Ruta: ${path} para ${userRole}`);
     console.log(`   Usuario: ${req.user.username} (ID: ${req.user.userId})`);
     
-    // Agregar información del rol al request para uso posterior
+    // Agregar información del rol al request
     req.user.role = userRole;
     req.user.roleName = userRole;
     
     next();
   } catch (error) {
     console.error("\n❌ AUTO VERIFY ROLE - Error:", error);
-    console.error("Stack:", error.stack);
-    
     return res.status(500).json({
       ok: false,
       msg: "Error verificando permisos",
@@ -146,7 +142,6 @@ export const autoVerifyRole = async (req, res, next) => {
 
 /**
  * Middleware para verificar roles específicos explícitamente
- * Ejemplo: verifyRole(['admin', 'docente'])
  */
 export const verifyRole = (requiredRoles = []) => {
   return async (req, res, next) => {
@@ -159,7 +154,7 @@ export const verifyRole = (requiredRoles = []) => {
       }
 
       const userRoleId = req.user.Id_rol;
-      const userRole = roleMap[userRoleId] || 'estudiante';
+      const userRole = roleMap[userRoleId] || 'cliente';
       
       console.log(`\n🔍 VERIFY ROLE EXPLÍCITO - Usuario: ${req.user.userId}, Rol: ${userRole}`);
       console.log(`   Roles requeridos: [${requiredRoles.join(', ')}]`);
@@ -195,24 +190,14 @@ export const verifyRole = (requiredRoles = []) => {
   };
 };
 
-// Función helper para verificar si un usuario tiene un rol específico
-export const hasRole = (userId, requiredRole) => {
-  // Esta función es útil para lógica de negocio dentro de controladores
-  // Nota: En la práctica, necesitarías acceder a la base de datos
-  console.log(`🔍 hasRole - Verificando rol ${requiredRole} para usuario ${userId}`);
-  return true; // Implementación básica
-};
-
-// Exportar routePermissions para debugging o uso en otros lugares
+// Exportar routePermissions para debugging
 export const getRoutePermissions = () => {
   return routePermissions;
 };
 
-// Exportar para uso en routeGuard.middleware.js
 export default {
   autoVerifyRole,
   verifyRole,
   roleMap,
-  getRoutePermissions,
-  hasRole
+  getRoutePermissions
 };

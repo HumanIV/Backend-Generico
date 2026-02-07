@@ -1,199 +1,220 @@
-import jwt from "jsonwebtoken";
-import { UserModel } from "../models/user.model.js";
+// middlewares/jwt.middleware.js - VERSIÓN COMPLETA Y CORREGIDA
+import jwt from 'jsonwebtoken';
+import dotenv from 'dotenv';
 
-// Claves por defecto para desarrollo
-const JWT_SECRET = process.env.JWT_SECRET || "danza-jwt-secret-key-2024-development";
-const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "danza-refresh-secret-key-2024-development";
+dotenv.config();
 
-// Función helper para verificar estado - EXPORTADA
-export const isUserActive = (user) => {
-  if (!user || !user.is_active) return false;
-  
-  // Normalizar el estado: convertir a minúsculas, quitar espacios
-  const normalizedStatus = String(user.is_active || '')
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, '');
-  
-  // Aceptar varias formas de "activo"
-  const activeStatuses = ['activo', 'active', 'activado', 'enabled', 'true', '1', 'yes', 'sí'];
-  return activeStatuses.includes(normalizedStatus);
-};
+// Configuración de JWT (SIN DUPLICADOS)
+const JWT_SECRET = process.env.JWT_SECRET || 'tu_secreto_super_seguro_2026';
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'tu_refresh_secreto_super_seguro_2026';
 
-export const verifyToken = async (req, res, next) => {
+// Middleware de autenticación principal
+const authenticate = (req, res, next) => {
   try {
-    console.log("🔍 MIDDLEWARE - Iniciando verificación de token");
-
+    console.log('🔐 MIDDLEWARE - Verificando autenticación...');
+    
+    // Obtener token del header
     const authHeader = req.headers.authorization;
-    console.log("🔍 MIDDLEWARE - Authorization header:", authHeader ? "EXISTE" : "NO EXISTE");
-
+    
     if (!authHeader) {
-      console.log("❌ MIDDLEWARE - No hay header de autorización");
+      console.log('❌ MIDDLEWARE - No hay header Authorization');
       return res.status(401).json({
         ok: false,
-        msg: "No token provided",
+        msg: 'Acceso denegado. Token no proporcionado.'
       });
     }
 
-    const parts = authHeader.split(" ");
-    if (parts.length !== 2 || parts[0] !== "Bearer") {
-      console.log("❌ MIDDLEWARE - Formato de token inválido");
+    // Verificar formato "Bearer token"
+    if (!authHeader.startsWith('Bearer ')) {
+      console.log('❌ MIDDLEWARE - Formato de token incorrecto');
       return res.status(401).json({
         ok: false,
-        msg: "Invalid token format",
+        msg: 'Formato de token incorrecto. Use: Bearer <token>'
       });
     }
 
-    const token = parts[1];
-    console.log("🔍 MIDDLEWARE - Token extraído, longitud:", token.length);
-
-    try {
-      console.log("🔍 MIDDLEWARE - Verificando token con JWT...");
-      const decoded = jwt.verify(token, JWT_SECRET);
-      console.log("✅ MIDDLEWARE - Token decodificado exitosamente:", {
-        userId: decoded.userId,
-        username: decoded.username,
-        Id_rol: decoded.Id_rol, // CORREGIDO: Usar Id_rol, no permiso_id
-        exp: new Date(decoded.exp * 1000).toISOString(),
-      });
-
-      // Verificar que el usuario existe y está activo
-      console.log("🔍 MIDDLEWARE - Buscando usuario en BD...");
-      const user = await UserModel.findOneById(decoded.userId);
-
-      if (!user) {
-        console.log("❌ MIDDLEWARE - Usuario no encontrado en BD");
-        return res.status(401).json({
-          ok: false,
-          msg: "User not found",
-        });
-      }
-
-      console.log("✅ MIDDLEWARE - Usuario encontrado:", {
-        id: user.id,
-        username: user.username,
-        is_active: user.is_active,
-        Id_rol: user.Id_rol,
-      });
-
-      // Usar la función isUserActive
-      if (!isUserActive(user)) {
-        console.log("❌ MIDDLEWARE - Usuario inactivo. Estado:", user.is_active);
-        return res.status(403).json({
-          ok: false,
-          msg: "Account is inactive",
-        });
-      }
-
-      // Agregar información del usuario al request - CORREGIDO
-      req.user = {
-        userId: decoded.userId,
-        username: decoded.username,
-        Id_rol: decoded.Id_rol, // CORREGIDO: Usar Id_rol
-        nombre: decoded.nombre || user.nombre,
-        apellido: decoded.apellido || user.apellido,
-        email: decoded.email || user.email,
-        cedula: decoded.cedula || user.cedula,
-      };
-
-      console.log("✅ MIDDLEWARE - Verificación completada exitosamente");
-      next();
-    } catch (jwtError) {
-      console.log("❌ MIDDLEWARE - Error JWT:", {
-        name: jwtError.name,
-        message: jwtError.message,
-      });
-
-      if (jwtError.name === "TokenExpiredError") {
-        return res.status(401).json({
-          ok: false,
-          msg: "Token expired",
-        });
-      }
-
-      if (jwtError.name === "JsonWebTokenError") {
-        return res.status(401).json({
-          ok: false,
-          msg: "Invalid token",
-        });
-      }
-
+    // Extraer token
+    const token = authHeader.split(' ')[1];
+    
+    if (!token) {
+      console.log('❌ MIDDLEWARE - Token vacío');
       return res.status(401).json({
         ok: false,
-        msg: "Token verification failed",
-        error: jwtError.message,
+        msg: 'Token no proporcionado'
       });
     }
-  } catch (error) {
-    console.error("❌ MIDDLEWARE - Error general:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Server error in token verification",
-      error: error.message,
+
+    console.log('🔍 MIDDLEWARE - Verificando token JWT...');
+    
+    // Verificar y decodificar token
+    const decoded = jwt.verify(token, JWT_SECRET);
+    
+    console.log('✅ MIDDLEWARE - Token válido para usuario:', {
+      userId: decoded.userId,
+      username: decoded.username,
+      email: decoded.email
     });
-  }
-};
 
-export const verifyAdmin = async (req, res, next) => {
-  try {
-    const user = await UserModel.findOneById(req.user.userId);
-
-    if (!user) {
-      return res.status(404).json({
-        ok: false,
-        msg: "User not found",
-      });
-    }
-
-    // Verificar si tiene permisos de administrador (Id_rol = 1 es "Administrador")
-    // Ajusta este valor según tu base de datos
-    if (user.Id_rol !== 1) { // CORREGIDO: Usar Id_rol, no permiso_id
-      return res.status(403).json({
-        ok: false,
-        msg: "Admin access required",
-      });
-    }
+    // Agregar información del usuario al request
+    req.user = {
+      userId: decoded.userId,
+      username: decoded.username,
+      Id_rol: decoded.Id_rol,
+      email: decoded.email,
+      nombre: decoded.nombre,
+      apellido: decoded.apellido,
+      avatar_url: decoded.avatar_url,
+      es_empleado: decoded.es_empleado,
+      es_cliente: decoded.es_cliente
+    };
 
     next();
   } catch (error) {
-    console.error("Error in verifyAdmin:", error);
-    return res.status(500).json({
+    console.error('❌ MIDDLEWARE - Error de autenticación:', error.message);
+    
+    // Manejar diferentes tipos de errores
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        ok: false,
+        msg: 'Token expirado. Por favor, inicie sesión nuevamente.'
+      });
+    }
+    
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({
+        ok: false,
+        msg: 'Token inválido o corrupto.'
+      });
+    }
+
+    if (error.name === 'NotBeforeError') {
+      return res.status(401).json({
+        ok: false,
+        msg: 'Token no activo aún.'
+      });
+    }
+
+    // Error general
+    return res.status(401).json({
       ok: false,
-      msg: "Server error",
+      msg: 'Error de autenticación. Token inválido o expirado.'
     });
   }
 };
 
-export const verifyAdminOrReadOnly = async (req, res, next) => {
-  try {
-    const user = await UserModel.findOneById(req.user.userId);
-
-    if (!user) {
-      return res.status(404).json({
+// Middleware para verificar roles específicos
+const authorize = (...allowedRoles) => {
+  return (req, res, next) => {
+    console.log('👮 MIDDLEWARE - Verificando autorización para roles:', allowedRoles);
+    
+    if (!req.user) {
+      return res.status(401).json({
         ok: false,
-        msg: "User not found",
+        msg: 'Usuario no autenticado'
       });
     }
 
-    // Permitir acceso a administradores y otros roles
-    // Ajusta estos valores según tu base de datos
-    const allowedRoles = [1, 2, 3, 4]; // CORREGIDO: Usar Id_rol
+    const userRole = req.user.Id_rol;
+    console.log('👤 MIDDLEWARE - Rol del usuario:', userRole);
 
-    if (!allowedRoles.includes(user.Id_rol)) { // CORREGIDO: Usar Id_rol
+    // Verificar si el rol del usuario está en los permitidos
+    if (!allowedRoles.includes(userRole)) {
+      console.log('❌ MIDDLEWARE - Acceso denegado. Rol no permitido');
       return res.status(403).json({
         ok: false,
-        msg: "Insufficient permissions",
+        msg: 'Acceso denegado. No tienes permisos suficientes.',
+        requiredRoles: allowedRoles,
+        yourRole: userRole
       });
     }
 
+    console.log('✅ MIDDLEWARE - Autorización concedida');
+    next();
+  };
+};
+
+// Middleware para verificar si es administrador
+const isAdmin = (req, res, next) => {
+  return authorize(1)(req, res, next); // ID 1 = admin
+};
+
+// Middleware para verificar si es gerente o admin
+const isManagerOrAdmin = (req, res, next) => {
+  return authorize(1, 2)(req, res, next); // ID 1 = admin, 2 = gerente
+};
+
+// Middleware para verificar si es empleado o superior
+const isEmployeeOrAbove = (req, res, next) => {
+  return authorize(1, 2, 3)(req, res, next); // admin, gerente, empleado
+};
+
+// Función para generar tokens
+const generateToken = (userData) => {
+  return jwt.sign(userData, JWT_SECRET, { expiresIn: '24h' });
+};
+
+// Función para generar refresh token
+const generateRefreshToken = (userId) => {
+  return jwt.sign({ userId }, JWT_REFRESH_SECRET, { expiresIn: '7d' });
+};
+
+// Middleware para verificar refresh token
+const verifyRefreshToken = (req, res, next) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(400).json({
+        ok: false,
+        msg: 'Refresh token es requerido'
+      });
+    }
+
+    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
+    req.userId = decoded.userId;
+    
     next();
   } catch (error) {
-    console.error("Error in verifyAdminOrReadOnly:", error);
-    return res.status(500).json({
+    console.error('❌ Error verificando refresh token:', error.message);
+    
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        ok: false,
+        msg: 'Refresh token expirado'
+      });
+    }
+    
+    return res.status(401).json({
       ok: false,
-      msg: "Server error",
+      msg: 'Refresh token inválido'
     });
   }
 };
 
-export { JWT_SECRET, JWT_REFRESH_SECRET };
+// Exportar todo
+export {
+  authenticate,
+  authorize,
+  isAdmin,
+  isManagerOrAdmin,
+  isEmployeeOrAbove,
+  generateToken,
+  generateRefreshToken,
+  verifyRefreshToken,
+  JWT_SECRET,
+  JWT_REFRESH_SECRET
+};
+
+// También puedes exportar por defecto si prefieres
+export default {
+  authenticate,
+  authorize,
+  isAdmin,
+  isManagerOrAdmin,
+  isEmployeeOrAbove,
+  generateToken,
+  generateRefreshToken,
+  verifyRefreshToken,
+  JWT_SECRET,
+  JWT_REFRESH_SECRET
+};
