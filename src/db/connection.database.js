@@ -8,7 +8,7 @@ const connectionString = process.env.DATABASE_URL;
 const pool = new Pool({
   connectionString: connectionString,
   ssl: {
-    rejectUnauthorized: false // IMPORTANTE para Neon
+    rejectUnauthorized: false 
   },
   max: 20,
   idleTimeoutMillis: 30000,
