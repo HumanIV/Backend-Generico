@@ -30,7 +30,7 @@ export const testConnection = async () => {
       ORDER BY table_name
     `);
     
-    console.log('✅ Tablas verificadas:', checkQuery.rows.map(r => r.table_name).join(', '));
+    console.log(' Tablas verificadas:', checkQuery.rows.map(r => r.table_name).join(', '));
     
     // Obtener información de la base de datos
     const dbInfo = await client.query(`
